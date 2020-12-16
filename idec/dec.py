@@ -16,11 +16,27 @@ import sys
 import threading
 import time
 import traceback
+from multiprocessing.dummy import Pool as ThreadPool
 
 app_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(app_root)
 
 from logzero import logger as log
+
+__all__ = [
+    'Curried',
+    'Deprecated',
+    'TimeoutException',
+    'async_threads',
+    'block_until_expired',
+    'catch',
+    'catchit',
+    'later',
+    'prt',
+    'retry',
+    'singleton',
+    'threads',
+]
 
 
 def singleton(cls):
@@ -64,12 +80,16 @@ class Singleton(type):
         return Singleton._instance[cls]
 
 
-def retry(tries, delay=0, back_off=1, raise_msg=''):
+def retry(tries, delay=0, back_off=1, raise_msg='', accepted=None):
     """Retries a function or method until it got True.
+
+    in some situation, we want to use the ``not True`` as right response,
+    so we can put those not True to ``accepted list`` to skip retry
 
     - ``delay`` sets the initial delay in seconds
     - ``back_off`` sets the factor by which
     - ``raise_msg`` if not '', it'll raise an Exception
+    - ``accepted`` which not True: [0, False, '', None ...]
     """
 
     if back_off < 1:
@@ -88,6 +108,9 @@ def retry(tries, delay=0, back_off=1, raise_msg=''):
 
             while max_tries > 0:
                 rv = f(*args, **kwargs)  # first attempt
+                if isinstance(accepted, list):
+                    if rv in accepted:
+                        return rv
                 if rv:  # Done on success
                     return rv
 
@@ -541,3 +564,98 @@ def prt(show=False):
         return wrapper
 
     return dec
+
+
+def catchit(do_catch=True, exceptions=TypeError, hints='', do_raise=None, prt_tb=True, skip_log=False):
+    """Catch the specified exceptions, and ensure code can carry on
+
+    - if tired of the ``try except`` way, can take this for instead
+
+    Args:
+        do_catch (): do a catch or not
+        exceptions (): can be a tuple or just one
+        hints (): the hint to show
+        do_raise (): if do_raise, will raise the hints or just where the exception happened
+        prt_tb (): print the traceback info or not
+        skip_log (): skip log the error/traceback
+
+    """
+
+    def dec(fn):
+        @wraps(fn)
+        def wrapper_(*args, **kwargs):
+            if not do_catch:
+                return fn(*args, **kwargs)
+
+            try:
+                return fn(*args, **kwargs)
+            except exceptions as e:
+                if not skip_log:
+                    log.error("{}({})>{}: has err({})".format(
+                        fn.__code__.co_filename.split('/')[-1],
+                        fn.__code__.co_firstlineno,
+                        fn.__name__, e))
+                    if prt_tb:
+                        traceback.print_exc()
+                if do_raise:
+                    raise do_raise(
+                        hints or "{}({}):{}".format(
+                            fn.__code__.co_filename.split('/')[-1],
+                            fn.__code__.co_firstlineno,
+                            fn.__name__)
+                    )
+
+        return wrapper_
+
+    return dec
+
+
+def thread_pool(pool_size=0, block=True, owner=None):
+    """
+    easy running with threads pool, but using this will be a little tricky
+
+    Warnings: fn's parameters required an iterable list
+
+    Usage:
+
+        def fn(who):
+            print(who)
+
+        but with @thread_pool fn, the caller param is totally different with no decorator
+        @thread_pool(4)
+        def fn(who):
+            print(who)
+
+        without:
+            call: fn(['am1', 'am2', 'am3']) => ['am1', 'am2', 'am3']
+
+        with:
+            call: fn(['am1', 'am2', 'am3']) => am1\n am2\n am3
+
+    I. pool_size = 0 equals no decorator
+    II. pool_size > 0 be decorated
+
+    Args:
+        pool_size (int):
+        block (bool): block process
+        owner (list): if owner will append current pool to owner
+    """
+
+    def dec_(fn):
+        @wraps(fn)
+        def wrapper_(*args, **kwargs):
+            if pool_size == 0:
+                return fn(*args, **kwargs)
+
+            pool = ThreadPool(pool_size)
+            result = pool.map_async(fn, *args, **kwargs)
+
+            if owner is not None:
+                owner.append(result)
+
+            if block:
+                result.wait()
+
+        return wrapper_
+
+    return dec_
